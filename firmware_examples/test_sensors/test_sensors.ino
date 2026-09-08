@@ -94,7 +94,6 @@ void setup() {
   while (!Serial && millis() - t0 < 3000) {
     delay(10);
   }  // give USB CDC time to enumerate
-  delay(100);
 
   // --- buttons ---
   pinMode(PIN_BTN_SW3, INPUT);  // buttons have external pull-up resistors
@@ -109,6 +108,7 @@ void setup() {
   // --- I2C ---
   Wire.begin(PIN_SDA, PIN_SCL);
   Wire.setClock(400000);
+  delay(100);
 
   // --- IMU ---
   if (imu.begin_I2C(LSM6DS3_ADDR, &Wire)) {
