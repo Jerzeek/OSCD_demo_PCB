@@ -89,6 +89,7 @@ uint32_t lastSensorPrint = 0;
 void setup() {
   // --- Serial ---
   Serial.begin(115200);
+  Serial.setTxTimeoutMs(0); // prevent USB CDC port from blocking the sketch
   uint32_t t0 = millis();
   while (!Serial && millis() - t0 < 3000) {
     delay(10);
@@ -185,7 +186,7 @@ void handleButtons() {
 
 // ---------- Ambient light -> LED brightness ----------
 void handleAls() {
-  const uint16_t max_lux = 20000;
+  const uint16_t max_lux = 10000;
   uint8_t brightness = map(constrain(apds9306ReadALS(), 0, max_lux), 0, max_lux, 0, 255);
   strip.setBrightness(brightness);
 }
