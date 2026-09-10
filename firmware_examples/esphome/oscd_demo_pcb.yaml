@@ -1,0 +1,291 @@
+# =============================================================================
+#  OSCD Demo PCB (rev 1.0) — ESPHome configuration
+#  Open Science Community Delft — CERN-OHL-P
+#
+#  Exposes every peripheral on the board to Home Assistant:
+#    - 12x WS2812B ring          (light)
+#    - LSM6DS3 accel/gyro/temp   (motion + sensor)
+#    - APDS-9306-065 ambient light (sensor)
+#    - MPR121 12-channel touch   (binary_sensor)
+#    - 3x push buttons           (binary_sensor)
+#
+#  FIRST FLASH
+#    The board has no auto-reset circuit, so the very first flash must be over
+#    USB with the bootloader entered by hand:
+#        hold BOOT (SW2) -> tap RESET (SW1) -> release BOOT
+#        esphome run oscd_demo_pcb.yaml
+#    After that, OTA takes over and the buttons are never needed again.
+#
+#  Copy secrets.yaml.example to secrets.yaml and fill it in first.
+# =============================================================================
+
+substitutions:
+  name: oscd-demo-pcb
+  friendly_name: OSCD Demo PCB
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  # The lsm6ds motion platform landed in ESPHome 2026.6.0. Older versions will
+  # fail validation on the `motion:` block below rather than silently misbehave.
+  min_version: 2026.6.0
+
+esp32:
+  board: esp32-c3-devkitm-1   # ESP32-C3, 4 MB flash, no PSRAM — matches ESP32-C3-MINI-1
+  variant: esp32c3
+  framework:
+    type: esp-idf
+
+# The C3 has no USB-UART bridge; logging goes over the native USB Serial/JTAG
+# peripheral. This is the default on C3 and can be omitted — it is spelled out
+# here because it is the single thing people get wrong on this chip.
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret fallback_password
+
+captive_portal:
+
+# -----------------------------------------------------------------------------
+#  Web server — the board's own UI, at http://<device-ip>/
+#
+#  This is what makes the board demonstrable away from Home Assistant: if it
+#  cannot reach a known network it raises its own AP (see `wifi: ap:` above),
+#  and you browse to http://192.168.4.1/ to get every entity below, live.
+#
+#  `local: true` is the load-bearing setting. Without it the page pulls its
+#  CSS/JS from esphome.io, which is exactly what you will not have while
+#  connected to the board's own access point. It costs flash; see README.
+# -----------------------------------------------------------------------------
+web_server:
+  port: 80
+  version: 3
+  local: true
+  ota: false          # OTA stays available via captive_portal and the HA API
+  include_internal: false
+
+# -----------------------------------------------------------------------------
+#  I2C — one 400 kHz bus shared by all three sensors
+# -----------------------------------------------------------------------------
+i2c:
+  sda: GPIO7
+  scl: GPIO6
+  frequency: 400kHz
+  scan: true
+
+# -----------------------------------------------------------------------------
+#  LED ring — 12x WS2812B-2020
+#  D1 sits at 9 o'clock; the chain runs clockwise D1 -> D12.
+# -----------------------------------------------------------------------------
+light:
+  - platform: esp32_rmt_led_strip
+    id: ring
+    name: "Ring"
+    pin:
+      number: GPIO8
+      # GPIO8 is a strapping pin, held high at reset by R3 (10k to 3V3) so the
+      # chip boots normally. Driving it afterwards is intended, not an accident.
+      ignore_strapping_warning: true
+    num_leds: 12
+    chipset: WS2812
+    channel_colors: GRB
+    use_psram: false      # ESP32-C3-MINI-1 has no PSRAM
+    max_refresh_rate: 16ms
+    default_transition_length: 250ms
+    effects:
+      - addressable_rainbow:
+          name: "Rainbow"
+      - addressable_scan:
+          name: "Scan"
+      - pulse:
+          name: "Pulse"
+      # Mirrors the Arduino demo: each touch electrode lights the LED nearest to
+      # it. The map is lifted from test_sensors.ino, where it was worked out
+      # against the physical pad and LED positions.
+      - addressable_lambda:
+          name: "Touch trace"
+          update_interval: 30ms
+          lambda: |-
+            static const uint8_t led_map[12] = {3, 2, 1, 0, 11, 10, 9, 8, 7, 6, 5, 4};
+            static esphome::binary_sensor::BinarySensor *pads[12] = {
+              id(touch_0), id(touch_1), id(touch_2),  id(touch_3),
+              id(touch_4), id(touch_5), id(touch_6),  id(touch_7),
+              id(touch_8), id(touch_9), id(touch_10), id(touch_11),
+            };
+            it.all() = Color::BLACK;
+            for (uint8_t i = 0; i < 12; i++) {
+              if (pads[i]->state) {
+                it[led_map[i]] = current_color;
+              }
+            }
+
+# -----------------------------------------------------------------------------
+#  LSM6DS3 IMU — accelerometer + gyroscope + on-chip temperature
+#  I2C 0x6A (SA0 tied low by R27). INT1/INT2 are wired to GPIO4/GPIO5 but the
+#  component polls, so they are left unused here.
+# -----------------------------------------------------------------------------
+motion:
+  - platform: lsm6ds
+    id: imu
+    address: 0x6A
+    accelerometer_range: 4G
+    accelerometer_odr: 104HZ
+    gyroscope_range: 2000DPS
+    gyroscope_odr: 208HZ
+
+sensor:
+  # --- IMU ---
+  - platform: motion
+    type: acceleration_x
+    name: "Accel X"
+  - platform: motion
+    type: acceleration_y
+    name: "Accel Y"
+  - platform: motion
+    type: acceleration_z
+    name: "Accel Z"
+  - platform: motion
+    type: roll
+    name: "Roll"
+  - platform: motion
+    type: pitch
+    name: "Pitch"
+  - platform: lsm6ds
+    name: "IMU Temperature"
+
+  # --- Ambient light (APDS-9306-065) ---
+  # Address 0x52 is the part default and is not configurable on this board.
+  - platform: apds9306
+    id: ambient_light
+    name: "Ambient Light"
+    address: 0x52
+    gain: 3
+    bit_width: 18
+    measurement_rate: 100ms
+    update_interval: 10s
+    filters:
+      - sliding_window_moving_average:
+          window_size: 5
+
+  # --- Diagnostics ---
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+    entity_category: diagnostic
+  - platform: uptime
+    name: "Uptime"
+    entity_category: diagnostic
+
+# -----------------------------------------------------------------------------
+#  MPR121 capacitive touch — 12 electrodes etched into the top copper
+#    ELE0-ELE5   TP2, the inner 6-segment slider
+#    ELE6-ELE11  TP1, the outer ring of 6 discrete buttons
+#  ADDR is tied to GND by R21, giving 0x5A. R17 (75k 1%) sets the charge current.
+# -----------------------------------------------------------------------------
+mpr121:
+  id: touch_hub
+  address: 0x5A
+  touch_threshold: 12
+  release_threshold: 6
+
+binary_sensor:
+  # --- Slider pads (TP2, inner) ---
+  - platform: mpr121
+    id: touch_0
+    channel: 0
+    name: "Slider 1"
+  - platform: mpr121
+    id: touch_1
+    channel: 1
+    name: "Slider 2"
+  - platform: mpr121
+    id: touch_2
+    channel: 2
+    name: "Slider 3"
+  - platform: mpr121
+    id: touch_3
+    channel: 3
+    name: "Slider 4"
+  - platform: mpr121
+    id: touch_4
+    channel: 4
+    name: "Slider 5"
+  - platform: mpr121
+    id: touch_5
+    channel: 5
+    name: "Slider 6"
+
+  # --- Touch buttons (TP1, outer) ---
+  - platform: mpr121
+    id: touch_6
+    channel: 6
+    name: "Pad 1"
+  - platform: mpr121
+    id: touch_7
+    channel: 7
+    name: "Pad 2"
+  - platform: mpr121
+    id: touch_8
+    channel: 8
+    name: "Pad 3"
+  - platform: mpr121
+    id: touch_9
+    channel: 9
+    name: "Pad 4"
+  - platform: mpr121
+    id: touch_10
+    channel: 10
+    name: "Pad 5"
+  - platform: mpr121
+    id: touch_11
+    channel: 11
+    name: "Pad 6"
+
+  # --- Push buttons ---
+  # Active low, with external 10k pull-ups and 100n debounce caps on the board,
+  # so no internal pullup is configured here.
+  - platform: gpio
+    id: button_sw3
+    name: "Button SW3"
+    pin:
+      number: GPIO1
+      mode:
+        input: true
+      inverted: true
+    on_press:
+      then:
+        - light.toggle: ring
+
+  - platform: gpio
+    id: button_sw4
+    name: "Button SW4"
+    pin:
+      number: GPIO0
+      mode:
+        input: true
+      inverted: true
+
+  # GPIO2 is an ESP32-C3 strapping pin and must be high at reset. R2 (10k to
+  # 3V3) holds it there, which is also why the button's own pull-up R8 is DNP.
+  - platform: gpio
+    id: button_sw5
+    name: "Button SW5"
+    pin:
+      number: GPIO2
+      mode:
+        input: true
+      inverted: true
+      ignore_strapping_warning: true
